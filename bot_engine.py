@@ -1,11 +1,13 @@
 import os
 import re
 import html
+import time
 from datetime import datetime
 
 import requests
 import feedparser
 from google import genai
+from google.genai import errors as genai_errors
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # ==============================================================================
@@ -166,20 +168,39 @@ def fetch_youtube_transcripts():
 # ==============================================================================
 # 5. SYNTHÈSE & ANALYSE AVEC GEMINI
 # ==============================================================================
-def analyze_with_gemini(raw_context):
-    """Envoie l'agrégat d'informations au modèle pour filtrage, explication et mise en forme."""
+def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
+    """
+    Envoie l'agrégat d'informations au modèle pour filtrage, explication et mise en forme.
+    Réessaie automatiquement en cas de saturation temporaire de Gemini (erreur 503 UNAVAILABLE,
+    fréquente sur le tier gratuit aux heures de pointe). N'insiste pas sur les erreurs côté requête
+    (clé invalide, quota dépassé, etc.), qui ne se résoudront pas en réessayant.
+    """
     if not GEMINI_API_KEY:
         raise ValueError("La variable GEMINI_API_KEY est manquante.")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-
     full_prompt = f"{SYSTEM_PROMPT}\n\n=== INFORMATIONS BRUTES À TRAITER ===\n{raw_context}"
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=full_prompt
-    )
-    return response.text
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=full_prompt
+            )
+            return response.text
+        except genai_errors.ServerError as e:
+            last_error = e
+            wait = base_delay * attempt
+            print(f"[!] Gemini indisponible (tentative {attempt}/{max_retries}) : {e}")
+            if attempt < max_retries:
+                print(f"    Nouvel essai dans {wait}s...")
+                time.sleep(wait)
+        except genai_errors.ClientError as e:
+            # Erreur côté requête (clé invalide, quota, prompt trop long...) : inutile de réessayer
+            raise
+
+    raise RuntimeError(f"Gemini indisponible après {max_retries} tentatives : {last_error}")
 
 # ==============================================================================
 # 6. MISE EN FORME TELEGRAM (HTML)
@@ -243,7 +264,16 @@ def main():
 """
 
     print("--> 2. Analyse par Gemini...")
-    report = analyze_with_gemini(raw_payload)
+    try:
+        report = analyze_with_gemini(raw_payload)
+    except Exception as e:
+        print(f"[!] Impossible de générer le briefing : {e}")
+        send_telegram(
+            "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
+            "indisponible ou saturé). Nouvelle tentative au prochain cycle."
+        )
+        return
+
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
