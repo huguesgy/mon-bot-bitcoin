@@ -53,7 +53,7 @@ FORMAT DE RÉPONSE OBLIGATOIRE :
 • [Catégorie] : [Troisième point majeur, si pertinent].
 
 ⚙️ INDICATEUR TECHNIQUE CLÉ :
-• Taux de Financement Binance (Funding Rate) : [Interprétation du chiffre fourni : Neutre, Surchauffe haussière, ou Pression vendeuse].
+• Taux de Financement (Funding Rate) : [Interprétation du chiffre fourni : Neutre, Surchauffe haussière, ou Pression vendeuse].
 
 🔗 SOURCES PRINCIPALES :
 1. [Nom du média] : [Lien URL direct]
