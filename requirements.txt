@@ -1,0 +1,5 @@
+google-genai
+feedparser
+requests
+youtube-transcript-api
+python-telegram-bot
