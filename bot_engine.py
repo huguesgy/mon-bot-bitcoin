@@ -65,19 +65,17 @@ Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactem
 # 2. COLLECTE DES DONNÉES DE MARCHÉ (BINANCE ENDPOINT PUBLIC)
 # ==============================================================================
 def fetch_funding_rate():
-    """Récupère le dernier taux de financement (Funding Rate) sans aucune clé."""
-    url = "https://fapi.binance.com/fapi/v1/fundingRate"
-    params = {"symbol": "BTCUSDT", "limit": 1}
+    """Récupère le dernier taux de financement BTCUSDT via Bybit (ouvert et non bloqué sur GitHub)."""
+    url = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        if data:
-            rate = float(data[0]["fundingRate"]) * 100
-            return f"{rate:+.4f}% sur 8 heures"
+        rate = float(data["result"]["list"][0]["fundingRate"]) * 100
+        return f"{rate:+.4f}% sur 8 heures (Bybit)"
     except Exception as e:
         print(f"[!] Erreur récupération Funding Rate : {e}")
-    return "Indisponible"
+        return "Indisponible"
 
 # ==============================================================================
 # 3. COLLECTE DES FLUX RSS
@@ -141,7 +139,7 @@ def analyze_with_gemini(raw_context):
     full_prompt = f"{SYSTEM_PROMPT}\n\n=== INFORMATIONS BRUTES À TRAITER ===\n{raw_context}"
     
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=full_prompt
     )
     return response.text
