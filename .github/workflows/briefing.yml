@@ -1,0 +1,39 @@
+name: Bitcoin Market Briefing
+
+on:
+  schedule:
+    # Planification UTC (GMT) :
+    # 06:00 UTC -> Clôture session asiatique / réveil Europe
+    # 13:30 UTC -> Début session US & annonces macro
+    # 21:00 UTC -> Clôture des marchés US
+    - cron: '0 6 * * *'
+    - cron: '30 13 * * *'
+    - cron: '0 21 * * *'
+  workflow_dispatch: # Permet de lancer le bot manuellement via un bouton sur GitHub pour tester
+
+jobs:
+  run-briefing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code du dépôt
+        uses: actions/checkout@v4
+
+      - name: Configurer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Installer les dépendances
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Exécuter le pipeline et envoyer sur Telegram
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bot_engine.py
