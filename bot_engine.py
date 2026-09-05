@@ -22,11 +22,16 @@ RSS_FEEDS = [
     "https://cointelegraph.com/rss/tag/bitcoin",
     "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
     "https://bitcoinmagazine.com/.rss/full/",
+    "https://cryptoslate.com/feed/",
+    # Sources officielles/primaires : peu de volume, mais signal fort quand un fait apparaît
+    "https://www.federalreserve.gov/feeds/press_monetary.xml",  # Décisions de taux, déclarations FOMC
+    "https://www.sec.gov/news/pressreleases.rss",  # Actions/poursuites de la SEC
 ]
 
 # ID des chaînes YouTube ciblées pour extraire automatiquement leur dernière vidéo
 YOUTUBE_CHANNELS = [
     {"name": "Grand Angle Crypto", "channel_id": "UCqK_m6k_gq3_bO7J45c7xzg"},
+    {"name": "Hasheur", "channel_id": "UChlTcWDE8gd4tsl_L727NrQ"},
 ]
 
 # Prompt système : anti-bruit + couche pédagogique
