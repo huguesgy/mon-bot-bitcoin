@@ -1,4 +1,8 @@
 import os
+import re
+import html
+from datetime import datetime
+
 import requests
 import feedparser
 from google import genai
@@ -19,62 +23,96 @@ RSS_FEEDS = [
 ]
 
 # ID des chaînes YouTube ciblées pour extraire automatiquement leur dernière vidéo
-# Exemples : Grand Angle Crypto, Hasheur
 YOUTUBE_CHANNELS = [
     {"name": "Grand Angle Crypto", "channel_id": "UCqK_m6k_gq3_bO7J45c7xzg"},
 ]
 
-# Prompt système : instructions rigoureuses anti-bruit
+# Prompt système : anti-bruit + couche pédagogique
+# NB : le format utilise **mot** pour le gras -> converti en <b>mot</b> pour Telegram (voir to_telegram_html)
 SYSTEM_PROMPT = """
-Tu es un analyste macroéconomique et de marché senior, dédié exclusivement au Bitcoin (BTC).
-Ta mission : analyser les données brutes (articles RSS, métriques de marché, transcriptions vidéo) et produire un briefing clair et actionnable.
+Tu es un analyste qui explique le marché du Bitcoin (BTC) à quelqu'un qui s'intéresse à la finance
+mais n'est pas encore à l'aise avec le vocabulaire et les mécanismes du secteur. Ta mission n'est pas
+seulement de rapporter des faits : c'est de les rendre compréhensibles.
 
-RÈGLES D'EXCLUSION STRICTES (À IGNORER TOTALEMENT) :
-- Les avis de traders anonymes, spéculations à court terme et titres clickbait ("x100", "krach imminent").
-- Les redondances : si plusieurs sources traitent du même événement, synthétise-le en un seul point.
+RÈGLES D'EXCLUSION STRICTES (à ignorer totalement) :
+- Avis de traders anonymes, spéculations court terme, titres clickbait ("x100", "krach imminent").
+- Redondances : si plusieurs sources traitent du même évènement, synthétise-le en un seul point.
 
-CRITÈRES DE SÉLECTION (RETENIR UNIQUEMENT LES FAITS MATÉRIELS) :
-1. Macroéconomie US & Banques centrales (taux Fed, inflation CPI/PCE, liquidité mondiale, US10Y).
+CRITÈRES DE SÉLECTION (ne retenir que les faits matériels) :
+1. Macroéconomie US & banques centrales (taux Fed, inflation CPI/PCE, liquidité mondiale, US10Y).
 2. Flux institutionnels vérifiés (entrées/sorties nettes des ETF Spot, réserves de trésorerie).
 3. Régulation contraignante (lois votées, poursuites judiciaires majeures SEC/CFTC).
 4. Dérivés & liquidations (Funding Rate anormal, cascades de liquidations).
 
+COMMENT EXPLIQUER (règle la plus importante — ne l'oublie jamais) :
+Pour CHAQUE fait retenu, ne te contente pas de l'énoncer. Ajoute systématiquement :
+- Le mécanisme : pourquoi/comment ce fait influence concrètement l'offre, la demande ou le prix du BTC.
+  Écris comme si tu expliquais à quelqu'un qui découvre le sujet, pas à un autre analyste.
+- Si un terme technique apparaît (funding rate, ETF spot, CPI, liquidité, short squeeze, etc.),
+  explique-le en une phrase simple, sans jargon supplémentaire.
+- Quand c'est pertinent, fais un rapprochement avec un évènement ou un mécanisme déjà connu
+  (ex: "comme lors d'un resserrement monétaire classique...") pour ancrer la compréhension.
+
 FORMAT DE RÉPONSE OBLIGATOIRE :
-📊 BRIEFING BITCOIN — SESSION DE MARCHÉ
---------------------------------------------------
-🏷️ CATALYSEURS : #MotClé1 #MotClé2 #MotClé3
+Utilise **mot** uniquement pour mettre du texte en gras. N'utilise aucun autre symbole de mise en forme
+(pas de #, pas de markdown de titre, pas de tirets pour les titres).
+Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
 
-⚡ EN BREF :
-[2 phrases claires expliquant la tendance majeure et l'impact directionnel sur la liquidité du BTC].
+**📊 BRIEFING BITCOIN — [date fournie]**
 
-🔍 FAITS MAJEURS RETENUS :
-• [Catégorie] : [Explication factuelle et conséquence mécanique sur l'offre ou la demande].
-• [Catégorie] : [Deuxième point majeur, si pertinent].
-• [Catégorie] : [Troisième point majeur, si pertinent].
+**🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
 
-⚙️ INDICATEUR TECHNIQUE CLÉ :
-• Taux de Financement (Funding Rate) : [Interprétation du chiffre fourni : Neutre, Surchauffe haussière, ou Pression vendeuse].
+**⚡ En bref**
+[2-3 phrases simples expliquant la tendance majeure et son impact sur le BTC]
 
-🔗 SOURCES PRINCIPALES :
-1. [Nom du média] : [Lien URL direct]
+**🔍 Ce qu'il s'est passé**
+• **[Catégorie]** — [le fait], ce qui [le mécanisme : comment ça bouge le cours, en langage clair]
+• **[Catégorie]** — [le fait], ce qui [le mécanisme]
 
-Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement : "AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
+**🧠 Pour comprendre**
+[1 à 3 termes techniques utilisés plus haut, chacun expliqué en une phrase simple]
+
+**⚙️ Indicateur clé**
+• Funding Rate : [chiffre] → [neutre / surchauffe haussière / pression vendeuse] — [ce que ça signifie concrètement pour quelqu'un qui débute]
+
+**🔗 Sources**
+1. [Nom du média] : [lien]
+
+Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement :
+"AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
 """
 
 # ==============================================================================
-# 2. COLLECTE DES DONNÉES DE MARCHÉ (BINANCE ENDPOINT PUBLIC)
+# 2. COLLECTE DES DONNÉES DE MARCHÉ
 # ==============================================================================
 def fetch_funding_rate():
-    """Récupère le dernier taux de financement BTCUSDT via Bybit (ouvert et non bloqué sur GitHub)."""
-    url = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
+    """
+    Récupère le dernier funding rate BTCUSDT.
+    Bybit en premier, puis OKX en secours : Bybit (et parfois Binance) bloquent les IP
+    de certains hébergeurs cloud (dont GitHub Actions), ce qui peut rendre la donnée
+    "Indisponible" sans qu'il y ait de bug dans le code.
+    """
+    # --- Tentative 1 : Bybit ---
     try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         rate = float(data["result"]["list"][0]["fundingRate"]) * 100
         return f"{rate:+.4f}% sur 8 heures (Bybit)"
     except Exception as e:
-        print(f"[!] Erreur récupération Funding Rate : {e}")
+        print(f"[!] Bybit indisponible ({e}), tentative via OKX...")
+
+    # --- Tentative 2 (secours) : OKX ---
+    try:
+        url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        rate = float(data["data"][0]["fundingRate"]) * 100
+        return f"{rate:+.4f}% sur 8 heures (OKX)"
+    except Exception as e:
+        print(f"[!] Erreur récupération Funding Rate (OKX) : {e}")
         return "Indisponible"
 
 # ==============================================================================
@@ -107,37 +145,36 @@ def fetch_youtube_transcripts():
             feed = feedparser.parse(feed_url)
             if not feed.entries:
                 continue
-            
+
             latest_video = feed.entries[0]
             video_id = latest_video.yt_videoid
             video_title = latest_video.title
             video_link = latest_video.link
 
-            # Télécharge les sous-titres (FR ou EN)
             transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['fr', 'en'])
             full_text = " ".join([item['text'] for item in transcript_data])
-            
+
             transcripts.append(
                 f"- Chaîne: {ch['name']}\n  Titre: {video_title}\n  Lien: {video_link}\n"
                 f"  Extrait Transcription: {full_text[:2000]}..."
             )
         except Exception as e:
             print(f"[i] Transcription non disponible pour {ch['name']} : {e}")
-            
+
     return "\n".join(transcripts) if transcripts else "Aucune vidéo récente exploitable."
 
 # ==============================================================================
-# 5. SYNTHÈSE & ANALYSE AVEC GEMINI 2.5 FLASH
+# 5. SYNTHÈSE & ANALYSE AVEC GEMINI
 # ==============================================================================
 def analyze_with_gemini(raw_context):
-    """Envoie l'agrégat d'informations au modèle pour filtrage et mise en forme."""
+    """Envoie l'agrégat d'informations au modèle pour filtrage, explication et mise en forme."""
     if not GEMINI_API_KEY:
         raise ValueError("La variable GEMINI_API_KEY est manquante.")
-        
+
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
+
     full_prompt = f"{SYSTEM_PROMPT}\n\n=== INFORMATIONS BRUTES À TRAITER ===\n{raw_context}"
-    
+
     response = client.models.generate_content(
         model="gemini-3.6-flash",
         contents=full_prompt
@@ -145,10 +182,21 @@ def analyze_with_gemini(raw_context):
     return response.text
 
 # ==============================================================================
-# 6. ENVOI DE L'ALERTE SUR TELEGRAM
+# 6. MISE EN FORME TELEGRAM (HTML)
+# ==============================================================================
+def to_telegram_html(text):
+    """
+    Convertit **mot** (demandé au modèle) en <b>mot</b>, et échappe le reste
+    pour un envoi sûr avec parse_mode='HTML'.
+    """
+    escaped = html.escape(text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+
+# ==============================================================================
+# 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
 def send_telegram(message_text):
-    """Expédie le message formaté sur votre canal ou chat privé Telegram."""
+    """Expédie le message formaté (HTML) sur votre canal ou chat privé Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
         return
@@ -156,10 +204,11 @@ def send_telegram(message_text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message_text,
+        "text": to_telegram_html(message_text),
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    
+
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
@@ -170,17 +219,21 @@ def send_telegram(message_text):
         print(f"[!] Exception lors de l'envoi Telegram : {e}")
 
 # ==============================================================================
-# 7. EXÉCUTION DU PIPELINE
+# 8. EXÉCUTION DU PIPELINE
 # ==============================================================================
 def main():
     print("--> 1. Collecte des métriques et des actualités...")
+    date_str = datetime.now().strftime("%d/%m/%Y — %H:%M")
     funding = fetch_funding_rate()
     rss_news = fetch_rss_news()
     yt_news = fetch_youtube_transcripts()
 
     raw_payload = f"""
+[DATE ET HEURE DU BRIEFING — à recopier telle quelle dans le titre]
+{date_str}
+
 [MÉTRIQUES TECHNIQUES]
-- Funding Rate BTCUSDT (Binance) : {funding}
+- Funding Rate BTCUSDT : {funding}
 
 [FLUX ACTUALITÉS RSS]
 {rss_news}
@@ -189,7 +242,7 @@ def main():
 {yt_news}
 """
 
-    print("--> 2. Analyse par Gemini 2.5 Flash...")
+    print("--> 2. Analyse par Gemini...")
     report = analyze_with_gemini(raw_payload)
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
