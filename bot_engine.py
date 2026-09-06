@@ -60,35 +60,41 @@ Pour CHAQUE fait retenu, ne te contente pas de l'énoncer. Ajoute systématiquem
 - Quand c'est pertinent, fais un rapprochement avec un évènement ou un mécanisme déjà connu
   (ex: "comme lors d'un resserrement monétaire classique...") pour ancrer la compréhension.
 
-FORMAT DE RÉPONSE OBLIGATOIRE :
-Utilise **mot** uniquement pour mettre du texte en gras. N'utilise aucun autre symbole de mise en forme
-(pas de #, pas de markdown de titre, pas de tirets pour les titres).
-Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
+FORMAT EXACT DU MESSAGE À RETOURNER :
 
-**📊 BRIEFING BITCOIN — [date fournie]**
+╔════════════════════════════════╗
+  🏛️  *MACRO & BITCOIN INTELLIGENCE*
+╚════════════════════════════════╝
+📅 _Session du {JOUR_HEURE}_  •  ⏱️ _Lecture : 45 sec_
 
-**🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
+⚡ *SYNTHÈSE EXÉCUTIVE*
+> [Résume en 2 phrases dures la tension centrale du marché : qui achète, qui vend, et quel catalyseur macro/institutionnel dicte la liquidité actuelle.]
 
-**⚡ En bref**
-[2-3 phrases simples expliquant la tendance majeure et son impact sur le BTC]
+──────────────────────────────────
+🎯 *CATALYSEURS MAJEURS EN JEU*
 
-**🔍 Ce qu'il s'est passé**
-• **[Catégorie]** — [le fait], ce qui [le mécanisme : comment ça bouge le cours, en langage clair]
-• **[Catégorie]** — [le fait], ce qui [le mécanisme]
+🔹 *[CATÉGORIE EN MAJUSCULES (ex: MACRO US / ETF SPOT / RÉGULATION)]*
+• *Fait :* [L'événement brut et chiffré, sans interprétation subjective]
+• *Mécanisme :* [Impact mécanique direct sur l'offre ou la demande de BTC en 1 phrase]
 
-**🧠 Pour comprendre**
-[1 à 3 termes techniques utilisés plus haut, chacun expliqué en une phrase simple]
+🔹 *[CATÉGORIE EN MAJUSCULES]*
+• *Fait :* [Deuxième fait matériel majeur avec chiffres précis]
+• *Mécanisme :* [Conséquence financière directe]
 
-**⚙️ Indicateur clé**
-• Funding Rate : [chiffre] → [neutre / surchauffe haussière / pression vendeuse] — [ce que ça signifie concrètement pour quelqu'un qui débute]
+──────────────────────────────────
+📊 *THERMOMÈTRE DE MARCHÉ*
 
-**🔗 Sources**
-1. [Nom du média] : [lien]
+• *Taux de Financement (8h) :* `[Taux exact fourni]`
+• *Régime de Marché :* `[NEUTRE | SURCHAUFFE ACHETEUSE | PRESSION VENDEUSE]`
+• *Biais Liquidité :* `[RISK-ON | RISK-OFF | HÉSITATION]`
 
-Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement :
-"AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
+──────────────────────────────────
+🔗 *DOCUMENTS SOURCES*
+• [Média Source 1](URL_1)
+• [Média Source 2](URL_2)
+
+Si aucun fait matériel pertinent n'est identifié dans le flux, réponds uniquement : "AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
 """
-
 # ==============================================================================
 # 2. COLLECTE DES DONNÉES DE MARCHÉ
 # ==============================================================================
@@ -228,13 +234,12 @@ def send_telegram(message_text):
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": to_telegram_html(message_text),
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-
+   payload = {
+    "chat_id": TELEGRAM_CHAT_ID,
+    "text": message_text,
+    "parse_mode": "Markdown",
+    "disable_web_page_preview": True
+}
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
