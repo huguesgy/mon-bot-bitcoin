@@ -247,17 +247,16 @@ def send_telegram(message_text):
 # ==============================================================================
 # 8. EXÉCUTION DU PIPELINE
 # ==============================================================================
+# ==============================================================================
+# 7. EXÉCUTION DU PIPELINE
+# ==============================================================================
 def main():
     print("--> 1. Collecte des métriques et des actualités...")
-    date_str = datetime.now().strftime("%d/%m/%Y — %H:%M")
     funding = fetch_funding_rate()
     rss_news = fetch_rss_news()
     yt_news = fetch_youtube_transcripts()
 
     raw_payload = f"""
-[DATE ET HEURE DU BRIEFING — à recopier telle quelle dans le titre]
-{date_str}
-
 [MÉTRIQUES TECHNIQUES]
 - Funding Rate BTCUSDT : {funding}
 
@@ -268,23 +267,14 @@ def main():
 {yt_news}
 """
 
-    print("--> 2. Analyse par Gemini...")
-    try:
-        report = analyze_with_gemini(raw_payload)
-    except Exception as e:
-        print(f"[!] Impossible de générer le briefing : {e}")
-        send_telegram(
-            "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
-            "indisponible ou saturé). Nouvelle tentative au prochain cycle."
-        )
-        return
-
+    print("--> 2. Analyse par Gemini 3.6 Flash...")
+    report = analyze_with_gemini(raw_payload)
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
-    print("\n--> 3. Envoi du briefing...")
-    # Envoie systématiquement le rapport généré par Gemini
-send_telegram(report)
+    print("\n--> 3. Envoi du briefing sur Telegram...")
+    send_telegram(report)
+
 
 if __name__ == "__main__":
     main()
