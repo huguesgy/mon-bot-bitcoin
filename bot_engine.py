@@ -228,18 +228,19 @@ def to_telegram_html(text):
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
 def send_telegram(message_text):
-    """Expédie le message formaté (HTML) sur votre canal ou chat privé Telegram."""
+    """Expédie le message formaté sur votre canal ou chat privé Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-   payload = {
-    "chat_id": TELEGRAM_CHAT_ID,
-    "text": message_text,
-    "parse_mode": "Markdown",
-    "disable_web_page_preview": True
-   }
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message_text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
