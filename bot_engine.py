@@ -283,10 +283,8 @@ def main():
     print(report)
 
     print("\n--> 3. Envoi du briefing...")
-    if "AUCUN SIGNAL MAJEUR DÉTECTÉ" in report:
-        print("[i] Aucun événement matériel détecté. Envoi ignoré.")
-    else:
-        send_telegram(report)
+    # Envoie systématiquement le rapport généré par Gemini
+send_telegram(report)
 
 if __name__ == "__main__":
     main()
