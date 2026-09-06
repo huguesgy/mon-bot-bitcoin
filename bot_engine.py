@@ -239,7 +239,7 @@ def send_telegram(message_text):
     "text": message_text,
     "parse_mode": "Markdown",
     "disable_web_page_preview": True
-}
+   }
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
