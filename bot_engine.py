@@ -60,41 +60,50 @@ Pour CHAQUE fait retenu, ne te contente pas de l'énoncer. Ajoute systématiquem
 - Quand c'est pertinent, fais un rapprochement avec un évènement ou un mécanisme déjà connu
   (ex: "comme lors d'un resserrement monétaire classique...") pour ancrer la compréhension.
 
-FORMAT EXACT DU MESSAGE À RETOURNER :
+LE RÉFLEXE DU TRADER FONDAMENTAL (à appliquer sur le fait le plus significatif du jour) :
+Un trader fondamental sérieux ne s'arrête jamais à "ce mouvement/cette nouvelle a l'air intéressant".
+Il vérifie systématiquement s'il y a une VRAIE DIVERGENCE exploitable : est-ce que ce fait change
+réellement l'équilibre du marché (nouveau catalyseur, rupture avec la tendance), ou ne fait-il que
+confirmer une direction déjà connue et déjà intégrée par tout le monde — auquel cas il n'y a pas
+de réel edge, même si ça semble intéressant en surface ? Sois honnête même quand la conclusion est
+"il n'y a pas de signal fort ici", c'est aussi précieux à savoir que l'inverse. Ne donne JAMAIS de
+verdict d'action (achat/vente/entrée en position) : le but est d'apprendre à raisonner ainsi, pas
+de dire quoi faire.
 
-╔════════════════════════════════╗
-  🏛️  *MACRO & BITCOIN INTELLIGENCE*
-╚════════════════════════════════╝
-📅 _Session du {JOUR_HEURE}_  •  ⏱️ _Lecture : 45 sec_
+FORMAT DE RÉPONSE OBLIGATOIRE :
+Utilise **mot** uniquement pour mettre du texte en gras. N'utilise aucun autre symbole de mise en forme
+(pas de #, pas de markdown de titre, pas de tirets pour les titres).
+Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
 
-⚡ *SYNTHÈSE EXÉCUTIVE*
-> [Résume en 2 phrases dures la tension centrale du marché : qui achète, qui vend, et quel catalyseur macro/institutionnel dicte la liquidité actuelle.]
+**📊 BRIEFING BITCOIN — [date fournie]**
 
-──────────────────────────────────
-🎯 *CATALYSEURS MAJEURS EN JEU*
+**🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
 
-🔹 *[CATÉGORIE EN MAJUSCULES (ex: MACRO US / ETF SPOT / RÉGULATION)]*
-• *Fait :* [L'événement brut et chiffré, sans interprétation subjective]
-• *Mécanisme :* [Impact mécanique direct sur l'offre ou la demande de BTC en 1 phrase]
+**⚡ En bref**
+[2-3 phrases simples expliquant la tendance majeure et son impact sur le BTC]
 
-🔹 *[CATÉGORIE EN MAJUSCULES]*
-• *Fait :* [Deuxième fait matériel majeur avec chiffres précis]
-• *Mécanisme :* [Conséquence financière directe]
+**🔍 Ce qu'il s'est passé**
+• **[Catégorie]** — [le fait], ce qui [le mécanisme : comment ça bouge le cours, en langage clair]
+• **[Catégorie]** — [le fait], ce qui [le mécanisme]
 
-──────────────────────────────────
-📊 *THERMOMÈTRE DE MARCHÉ*
+**🎓 Réflexe du trader fondamental**
+[Pour le fait le plus significatif : y a-t-il une vraie divergence exploitable, ou ce fait ne fait-il
+que confirmer une tendance déjà connue et déjà intégrée par le marché ? Explique le raisonnement,
+sans donner de verdict d'action.]
 
-• *Taux de Financement (8h) :* `[Taux exact fourni]`
-• *Régime de Marché :* `[NEUTRE | SURCHAUFFE ACHETEUSE | PRESSION VENDEUSE]`
-• *Biais Liquidité :* `[RISK-ON | RISK-OFF | HÉSITATION]`
+**🧠 Pour comprendre**
+[1 à 3 termes techniques utilisés plus haut, chacun expliqué en une phrase simple]
 
-──────────────────────────────────
-🔗 *DOCUMENTS SOURCES*
-• [Média Source 1](URL_1)
-• [Média Source 2](URL_2)
+**⚙️ Indicateur clé**
+• Funding Rate : [chiffre] → [neutre / surchauffe haussière / pression vendeuse] — [ce que ça signifie concrètement pour quelqu'un qui débute]
 
-Si aucun fait matériel pertinent n'est identifié dans le flux, réponds uniquement : "AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
+**🔗 Sources**
+1. [Nom du média] : [lien]
+
+Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement :
+"AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
 """
+
 # ==============================================================================
 # 2. COLLECTE DES DONNÉES DE MARCHÉ
 # ==============================================================================
@@ -228,7 +237,7 @@ def to_telegram_html(text):
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
 def send_telegram(message_text):
-    """Expédie le message formaté sur votre canal ou chat privé Telegram."""
+    """Expédie le message formaté (HTML) sur votre canal ou chat privé Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
         return
@@ -236,11 +245,11 @@ def send_telegram(message_text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message_text,
-        "parse_mode": "Markdown",
+        "text": to_telegram_html(message_text),
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    
+
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
@@ -253,16 +262,17 @@ def send_telegram(message_text):
 # ==============================================================================
 # 8. EXÉCUTION DU PIPELINE
 # ==============================================================================
-# ==============================================================================
-# 7. EXÉCUTION DU PIPELINE
-# ==============================================================================
 def main():
     print("--> 1. Collecte des métriques et des actualités...")
+    date_str = datetime.now().strftime("%d/%m/%Y — %H:%M")
     funding = fetch_funding_rate()
     rss_news = fetch_rss_news()
     yt_news = fetch_youtube_transcripts()
 
     raw_payload = f"""
+[DATE ET HEURE DU BRIEFING — à recopier telle quelle dans le titre]
+{date_str}
+
 [MÉTRIQUES TECHNIQUES]
 - Funding Rate BTCUSDT : {funding}
 
@@ -273,14 +283,25 @@ def main():
 {yt_news}
 """
 
-    print("--> 2. Analyse par Gemini 3.6 Flash...")
-    report = analyze_with_gemini(raw_payload)
+    print("--> 2. Analyse par Gemini...")
+    try:
+        report = analyze_with_gemini(raw_payload)
+    except Exception as e:
+        print(f"[!] Impossible de générer le briefing : {e}")
+        send_telegram(
+            "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
+            "indisponible ou saturé). Nouvelle tentative au prochain cycle."
+        )
+        return
+
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
-    print("\n--> 3. Envoi du briefing sur Telegram...")
-    send_telegram(report)
-
+    print("\n--> 3. Envoi du briefing...")
+    if "AUCUN SIGNAL MAJEUR DÉTECTÉ" in report:
+        print("[i] Aucun événement matériel détecté. Envoi ignoré.")
+    else:
+        send_telegram(report)
 
 if __name__ == "__main__":
     main()
