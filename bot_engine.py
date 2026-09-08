@@ -71,31 +71,52 @@ verdict d'action (achat/vente/entrée en position) : le but est d'apprendre à r
 de dire quoi faire.
 
 FORMAT DE RÉPONSE OBLIGATOIRE :
-Utilise **mot** uniquement pour mettre du texte en gras. N'utilise aucun autre symbole de mise en forme
-(pas de #, pas de markdown de titre, pas de tirets pour les titres).
+Utilise **mot** pour le gras, `mot` pour un style "code" à chasse fixe (réservé aux chiffres clés et
+aux termes techniques du glossaire), et un bloc ```...``` uniquement pour l'en-tête tout en haut.
+N'utilise aucun autre symbole de mise en forme.
+Reproduis EXACTEMENT les lignes de séparation (━━━━━━━━━━━━━━━━━━━━) telles quelles, sans les modifier
+ni les résumer.
 Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
 
-**📊 BRIEFING BITCOIN — [date fournie]**
+```
+════════════════════════════
+  BRIEFING BITCOIN
+  [date fournie] · UTC
+════════════════════════════
+```
 
 **🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
+
+━━━━━━━━━━━━━━━━━━━━
 
 **⚡ En bref**
 [2-3 phrases simples expliquant la tendance majeure et son impact sur le BTC]
 
+━━━━━━━━━━━━━━━━━━━━
+
 **🔍 Ce qu'il s'est passé**
 • **[Catégorie]** — [le fait], ce qui [le mécanisme : comment ça bouge le cours, en langage clair]
 • **[Catégorie]** — [le fait], ce qui [le mécanisme]
+
+━━━━━━━━━━━━━━━━━━━━
 
 **🎓 Réflexe du trader fondamental**
 [Pour le fait le plus significatif : y a-t-il une vraie divergence exploitable, ou ce fait ne fait-il
 que confirmer une tendance déjà connue et déjà intégrée par le marché ? Explique le raisonnement,
 sans donner de verdict d'action.]
 
+━━━━━━━━━━━━━━━━━━━━
+
 **🧠 Pour comprendre**
-[1 à 3 termes techniques utilisés plus haut, chacun expliqué en une phrase simple]
+• `[Terme]` : [définition simple]
+[1 à 3 termes techniques utilisés plus haut, chacun expliqué en une phrase simple, terme en style code]
+
+━━━━━━━━━━━━━━━━━━━━
 
 **⚙️ Indicateur clé**
-• Funding Rate : [chiffre] → [neutre / surchauffe haussière / pression vendeuse] — [ce que ça signifie concrètement pour quelqu'un qui débute]
+• Funding Rate : `[chiffre]` → [neutre / surchauffe haussière / pression vendeuse] — [ce que ça signifie concrètement pour quelqu'un qui débute]
+
+━━━━━━━━━━━━━━━━━━━━
 
 **🔗 Sources**
 1. [Nom du média] : [lien]
@@ -227,11 +248,18 @@ def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
 # ==============================================================================
 def to_telegram_html(text):
     """
-    Convertit **mot** (demandé au modèle) en <b>mot</b>, et échappe le reste
-    pour un envoi sûr avec parse_mode='HTML'.
+    Convertit la mise en forme légère demandée au modèle en HTML Telegram :
+    - ```bloc``` -> <pre>bloc</pre>   (en-tête façon terminal)
+    - **mot**    -> <b>mot</b>       (gras)
+    - `mot`      -> <code>mot</code> (chasse fixe, pour les chiffres/termes clés)
+    Le texte est d'abord échappé pour un envoi sûr avec parse_mode='HTML'.
+    L'ordre des remplacements compte : blocs d'abord, puis gras, puis code inline.
     """
     escaped = html.escape(text)
-    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"```(.+?)```", r"<pre>\1</pre>", escaped, flags=re.DOTALL)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"`(.+?)`", r"<code>\1</code>", escaped)
+    return escaped
 
 # ==============================================================================
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
