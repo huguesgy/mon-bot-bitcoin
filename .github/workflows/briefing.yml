@@ -2,11 +2,6 @@ name: Bitcoin Market Briefing
 
 on:
   workflow_dispatch:
-  schedule:
-    # Déclenchements de secours avec minutes décalées (en UTC)
-    - cron: '17 5 * * *'    # 06h17 UTC
-    - cron: '42 12 * * *'   # 13h42 UTC
-    - cron: '12 21 * * *'   # 21h12 UTC
 
 jobs:
   run-briefing:
