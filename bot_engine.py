@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import sys
 from datetime import datetime
 
 import requests
@@ -131,22 +132,11 @@ Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactem
 def fetch_funding_rate():
     """
     Récupère le dernier funding rate BTCUSDT.
-    Bybit en premier, puis OKX en secours : Bybit (et parfois Binance) bloquent les IP
-    de certains hébergeurs cloud (dont GitHub Actions), ce qui peut rendre la donnée
-    "Indisponible" sans qu'il y ait de bug dans le code.
+    OKX en premier : Bybit bloque systématiquement (403) les IP des serveurs GitHub
+    Actions (confirmé en usage réel), donc OKX évite une attente inutile à chaque run.
+    Bybit reste en second recours au cas où ce blocage soit levé un jour.
     """
-    # --- Tentative 1 : Bybit ---
-    try:
-        url = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        rate = float(data["result"]["list"][0]["fundingRate"]) * 100
-        return f"{rate:+.4f}% sur 8 heures (Bybit)"
-    except Exception as e:
-        print(f"[!] Bybit indisponible ({e}), tentative via OKX...")
-
-    # --- Tentative 2 (secours) : OKX ---
+    # --- Tentative 1 : OKX ---
     try:
         url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         response = requests.get(url, timeout=10)
@@ -155,7 +145,18 @@ def fetch_funding_rate():
         rate = float(data["data"][0]["fundingRate"]) * 100
         return f"{rate:+.4f}% sur 8 heures (OKX)"
     except Exception as e:
-        print(f"[!] Erreur récupération Funding Rate (OKX) : {e}")
+        print(f"[!] OKX indisponible ({e}), tentative via Bybit...")
+
+    # --- Tentative 2 (secours) : Bybit ---
+    try:
+        url = "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        rate = float(data["result"]["list"][0]["fundingRate"]) * 100
+        return f"{rate:+.4f}% sur 8 heures (Bybit)"
+    except Exception as e:
+        print(f"[!] Erreur récupération Funding Rate (Bybit) : {e}")
         return "Indisponible"
 
 # ==============================================================================
@@ -182,6 +183,7 @@ def fetch_rss_news(limit_per_feed=3):
 def fetch_youtube_transcripts():
     """Récupère les sous-titres de la dernière vidéo de chaque chaîne ciblée."""
     transcripts = []
+    yt_api = YouTubeTranscriptApi()  # API >= 1.0 : instance, plus de méthode de classe get_transcript()
     for ch in YOUTUBE_CHANNELS:
         feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={ch['channel_id']}"
         try:
@@ -194,8 +196,8 @@ def fetch_youtube_transcripts():
             video_title = latest_video.title
             video_link = latest_video.link
 
-            transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['fr', 'en'])
-            full_text = " ".join([item['text'] for item in transcript_data])
+            fetched = yt_api.fetch(video_id, languages=['fr', 'en'])
+            full_text = " ".join(snippet.text for snippet in fetched)
 
             transcripts.append(
                 f"- Chaîne: {ch['name']}\n  Titre: {video_title}\n  Lien: {video_link}\n"
@@ -306,10 +308,14 @@ def to_telegram_html(text):
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
 def send_telegram(message_text):
-    """Expédie le message formaté (HTML) sur votre canal ou chat privé Telegram."""
+    """
+    Expédie un message formaté (HTML) sur votre canal ou chat privé Telegram.
+    Retourne True si Telegram a confirmé la réception, False sinon — pour que main()
+    puisse faire échouer le job GitHub Actions de façon visible en cas de problème.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
-        return
+        return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -322,11 +328,50 @@ def send_telegram(message_text):
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
-            print("[✓] Briefing envoyé avec succès sur Telegram !")
+            print("[✓] Morceau envoyé avec succès sur Telegram !")
+            return True
         else:
             print(f"[!] Erreur Telegram ({res.status_code}) : {res.text}")
+            return False
     except Exception as e:
         print(f"[!] Exception lors de l'envoi Telegram : {e}")
+        return False
+
+SECTION_DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
+TELEGRAM_SAFE_CHUNK_LEN = 3200  # marge sous la limite dure de 4096 caractères de Telegram,
+                                # pour absorber l'inflation due aux balises HTML (<b>, <code>, <pre>)
+
+def split_report_into_chunks(raw_text, max_len=TELEGRAM_SAFE_CHUNK_LEN):
+    """
+    Découpe le rapport brut (avant conversion HTML) en plusieurs morceaux qui tiennent
+    chacun sous la limite Telegram, en coupant UNIQUEMENT au niveau des séparateurs de
+    section (━━━) pour ne jamais couper une balise ** / ` / ``` en deux morceaux.
+    """
+    sections = raw_text.split(SECTION_DIVIDER)
+    chunks, current = [], ""
+    for i, section in enumerate(sections):
+        piece = section if i == 0 else SECTION_DIVIDER + section
+        if current and len(current) + len(piece) > max_len:
+            chunks.append(current)
+            current = piece
+        else:
+            current += piece
+    if current.strip():
+        chunks.append(current)
+    return chunks
+
+def send_telegram_report(report_text):
+    """
+    Envoie le briefing sur Telegram, en le découpant en plusieurs messages si besoin.
+    Retourne True seulement si TOUS les morceaux ont été livrés avec succès.
+    """
+    chunks = split_report_into_chunks(report_text)
+    all_ok = True
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1 and i < len(chunks) - 1:
+            chunk += "\n\n(suite dans le message suivant...)"
+        all_ok = send_telegram(chunk) and all_ok
+    return all_ok
 
 # ==============================================================================
 # 8. EXÉCUTION DU PIPELINE
@@ -361,16 +406,19 @@ def main():
             "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
             "indisponible ou saturé). Nouvelle tentative au prochain cycle."
         )
-        return
+        sys.exit(1)  # Run visible en échec (croix rouge) : Gemini a posé problème
 
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
     print("\n--> 3. Envoi du briefing...")
     if "AUCUN SIGNAL MAJEUR DÉTECTÉ" in report:
-        print("[i] Aucun événement matériel détecté. Envoi ignoré.")
-    else:
-        send_telegram(report)
+        print("[i] Aucun événement matériel détecté. Envoi ignoré (comportement normal, pas une erreur).")
+        return
+
+    if not send_telegram_report(report):
+        print("[!] Le briefing a été généré mais n'a pas pu être livré (entièrement) sur Telegram.")
+        sys.exit(1)  # Run visible en échec (croix rouge) : Telegram a refusé/échoué l'envoi
 
 if __name__ == "__main__":
     main()
