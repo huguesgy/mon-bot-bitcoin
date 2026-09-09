@@ -246,15 +246,56 @@ def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
 # ==============================================================================
 # 6. MISE EN FORME TELEGRAM (HTML)
 # ==============================================================================
+SECTION_HEADERS = [
+    "⚡ En bref",
+    "🔍 Ce qu'il s'est passé",
+    "🎓 Réflexe du trader fondamental",
+    "🧠 Pour comprendre",
+    "⚙️ Indicateur clé",
+    "🔗 Sources",
+]
+
+def _wrap_header_block(text):
+    """
+    Garantit que le bandeau d'en-tête (════/titre/date/════) est bien encadré par
+    des ``` pour être rendu en police fixe, même si le modèle a oublié cette fois-ci.
+    """
+    if text.lstrip().startswith("```"):
+        return text  # déjà encadré, on ne touche à rien
+    match = re.match(r"(═{5,}(?:\n.*)*?\n═{5,})", text.lstrip())
+    if not match:
+        return text
+    block = match.group(1)
+    return text.replace(block, f"```{block}```", 1)
+
+def _ensure_bold_headers(text):
+    """
+    Garantit que les titres de section sont en gras, même si le modèle a oublié
+    les ** autour cette fois-ci (la fidélité au format n'est jamais garantie à 100%).
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped in SECTION_HEADERS:
+            lines[i] = f"**{stripped}**"
+        elif stripped.startswith("🏷️ Catalyseurs") and not stripped.startswith("**") and ":" in stripped:
+            label, rest = stripped.split(":", 1)
+            lines[i] = f"**{label.strip()} :**{rest}"
+    return "\n".join(lines)
+
 def to_telegram_html(text):
     """
     Convertit la mise en forme légère demandée au modèle en HTML Telegram :
     - ```bloc``` -> <pre>bloc</pre>   (en-tête façon terminal)
     - **mot**    -> <b>mot</b>       (gras)
     - `mot`      -> <code>mot</code> (chasse fixe, pour les chiffres/termes clés)
+    Les titres de section et le bandeau d'en-tête sont fiabilisés en amont (voir
+    _wrap_header_block / _ensure_bold_headers) car on ne peut pas garantir que le
+    modèle respecte le balisage à 100% à chaque génération.
     Le texte est d'abord échappé pour un envoi sûr avec parse_mode='HTML'.
-    L'ordre des remplacements compte : blocs d'abord, puis gras, puis code inline.
     """
+    text = _wrap_header_block(text)
+    text = _ensure_bold_headers(text)
     escaped = html.escape(text)
     escaped = re.sub(r"```(.+?)```", r"<pre>\1</pre>", escaped, flags=re.DOTALL)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
