@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import random
 import sys
 from datetime import datetime
 
@@ -17,6 +18,14 @@ from youtube_transcript_api import YouTubeTranscriptApi
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# Cascade de modèles Gemini (free tier) : si le premier est saturé, on passe au suivant.
+# Ordre : du plus récent (souvent moins sollicité) au plus éprouvé.
+GEMINI_MODELS = [
+    "gemini-3.8-flash",   # sorti le 02/09/2026, le plus récent → souvent moins de trafic
+    "gemini-3.7-flash",   # workhorse d'août 2026
+    "gemini-3.6-flash",   # ton modèle actuel, le plus éprouvé
+]
 
 # Flux RSS réputés et institutionnels (100% gratuits)
 RSS_FEEDS = [
@@ -35,7 +44,7 @@ YOUTUBE_CHANNELS = [
     {"name": "Hasheur", "channel_id": "UChlTcWDE8gd4tsl_L727NrQ"},
 ]
 
-# Prompt système : anti-bruit + couche pédagogique
+# Prompt système : anti-bruit + couche pédagogique + format enrichi
 # NB : le format utilise **mot** pour le gras -> converti en <b>mot</b> pour Telegram (voir to_telegram_html)
 SYSTEM_PROMPT = """
 Tu es un analyste qui explique le marché du Bitcoin (BTC) à quelqu'un qui s'intéresse à la finance
@@ -78,13 +87,21 @@ N'utilise aucun autre symbole de mise en forme.
 Reproduis EXACTEMENT les lignes de séparation (━━━━━━━━━━━━━━━━━━━━) telles quelles, sans les modifier
 ni les résumer.
 Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
+Pour le bloc Dashboard, recopie les données fournies (prix, Fear & Greed, Funding Rate) telles
+quelles — ne les invente pas, ne les arrondis pas autrement.
 
 ```
 ════════════════════════════
-  BRIEFING BITCOIN
+  📊 BRIEFING BITCOIN
   [date fournie] · UTC
 ════════════════════════════
 ```
+
+**💰 BTC** `[prix fourni]` **·** `[variation 24h fournie]`
+**📊 F&G** `[valeur F&G fournie]` [emoji F&G fourni]
+**📈 Funding** `[funding rate fourni]` **·** [neutre / surchauffe / pression vendeuse]
+
+━━━━━━━━━━━━━━━━━━━━
 
 **🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
 
@@ -122,6 +139,10 @@ sans donner de verdict d'action.]
 **🔗 Sources**
 1. [Nom du média] : [lien]
 
+━━━━━━━━━━━━━━━━━━━━
+
+⚠️ Ce briefing est éducatif et ne constitue pas un conseil financier. Faites vos propres recherches (DYOR) avant toute décision.
+
 Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement :
 "AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
 """
@@ -129,6 +150,60 @@ Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactem
 # ==============================================================================
 # 2. COLLECTE DES DONNÉES DE MARCHÉ
 # ==============================================================================
+def fetch_btc_price():
+    """
+    Récupère le prix actuel du BTC en USD et sa variation sur 24h via CoinGecko.
+    API 100% gratuite, sans clé, sans inscription.
+    """
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin",
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()["bitcoin"]
+        price = data["usd"]
+        change_24h = data["usd_24h_change"]
+        return f"${price:,.0f}", f"{change_24h:+.1f}%"
+    except Exception as e:
+        print(f"[!] Prix BTC indisponible : {e}")
+        return "Indisponible", "N/A"
+
+
+def fetch_fear_greed():
+    """
+    Récupère l'indice Fear & Greed crypto (0 = peur extrême, 100 = euphorie).
+    API 100% gratuite via alternative.me, sans clé.
+    Retourne (valeur_str, label, emoji) ex: ("72", "Greed", "🟢")
+    """
+    EMOJI_MAP = {
+        (0, 25): "🔴",    # Extreme Fear
+        (25, 45): "🟠",   # Fear
+        (45, 55): "🟡",   # Neutral
+        (55, 75): "🟢",   # Greed
+        (75, 101): "🟣",  # Extreme Greed
+    }
+    try:
+        url = "https://api.alternative.me/fng/?limit=1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()["data"][0]
+        value = int(data["value"])
+        label = data["value_classification"]
+        emoji = "⚪"
+        for (low, high), em in EMOJI_MAP.items():
+            if low <= value < high:
+                emoji = em
+                break
+        return f"{value}/100", label, emoji
+    except Exception as e:
+        print(f"[!] Fear & Greed indisponible : {e}")
+        return "N/A", "Indisponible", "⚪"
+
+
 def fetch_funding_rate():
     """
     Récupère le dernier funding rate BTCUSDT.
@@ -209,14 +284,58 @@ def fetch_youtube_transcripts():
     return "\n".join(transcripts) if transcripts else "Aucune vidéo récente exploitable."
 
 # ==============================================================================
-# 5. SYNTHÈSE & ANALYSE AVEC GEMINI
+# 5. SYNTHÈSE & ANALYSE AVEC GEMINI (cascade multi-modèle + retry agressif)
 # ==============================================================================
-def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
+def _retry_with_backoff(client, model_name, prompt, max_retries=3, base_delay=20):
+    """
+    Tente d'appeler un modèle Gemini donné avec backoff exponentiel + jitter.
+    Retourne le texte généré, ou lève l'exception si toutes les tentatives échouent.
+
+    Délais approximatifs : 20s → 60s → 120s (+ jitter ±30% à chaque fois).
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            return response.text
+        except genai_errors.ServerError as e:
+            last_error = e
+            if attempt < max_retries:
+                # Backoff exponentiel : base * 2^(attempt-1) → 20, 60, 120
+                raw_delay = base_delay * (2 ** (attempt - 1))
+                # Plafonner à 5 minutes pour ne pas attendre une éternité
+                capped_delay = min(raw_delay, 300)
+                # Jitter ±30% pour désynchroniser les requêtes concurrentes
+                jitter = capped_delay * random.uniform(-0.3, 0.3)
+                wait = max(5, capped_delay + jitter)  # au moins 5 secondes
+                print(f"[!] {model_name} indisponible (tentative {attempt}/{max_retries}) : {e}")
+                print(f"    Nouvel essai dans {wait:.0f}s...")
+                time.sleep(wait)
+            else:
+                print(f"[!] {model_name} indisponible (tentative {attempt}/{max_retries}) : {e}")
+        except genai_errors.ClientError:
+            # Erreur côté requête (clé invalide, quota, prompt trop long...) : inutile de réessayer
+            raise
+
+    raise last_error  # type: ignore[misc]
+
+
+def analyze_with_gemini(raw_context):
     """
     Envoie l'agrégat d'informations au modèle pour filtrage, explication et mise en forme.
-    Réessaie automatiquement en cas de saturation temporaire de Gemini (erreur 503 UNAVAILABLE,
-    fréquente sur le tier gratuit aux heures de pointe). N'insiste pas sur les erreurs côté requête
-    (clé invalide, quota dépassé, etc.), qui ne se résoudront pas en réessayant.
+
+    Stratégie de résilience (cascade multi-modèle) :
+    Pour chaque modèle dans GEMINI_MODELS, on tente 3 appels avec backoff exponentiel.
+    Si un modèle échoue après 3 tentatives (saturation, maintenance...), on passe au suivant.
+
+    Chaîne : gemini-3.8-flash → gemini-3.7-flash → gemini-3.6-flash
+    Temps total max : ~18 minutes (largement acceptable pour un cron espacé de plusieurs heures).
+
+    N'insiste pas sur les erreurs côté requête (clé invalide, quota dépassé, etc.), qui ne se
+    résoudront pas en réessayant — celles-ci remontent immédiatement.
     """
     if not GEMINI_API_KEY:
         raise ValueError("La variable GEMINI_API_KEY est manquante.")
@@ -225,25 +344,23 @@ def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
     full_prompt = f"{SYSTEM_PROMPT}\n\n=== INFORMATIONS BRUTES À TRAITER ===\n{raw_context}"
 
     last_error = None
-    for attempt in range(1, max_retries + 1):
+    for model_name in GEMINI_MODELS:
+        print(f"[→] Tentative avec {model_name}...")
         try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=full_prompt
-            )
-            return response.text
-        except genai_errors.ServerError as e:
-            last_error = e
-            wait = base_delay * attempt
-            print(f"[!] Gemini indisponible (tentative {attempt}/{max_retries}) : {e}")
-            if attempt < max_retries:
-                print(f"    Nouvel essai dans {wait}s...")
-                time.sleep(wait)
-        except genai_errors.ClientError as e:
-            # Erreur côté requête (clé invalide, quota, prompt trop long...) : inutile de réessayer
+            result = _retry_with_backoff(client, model_name, full_prompt)
+            print(f"[✓] Réponse obtenue via {model_name}")
+            return result
+        except genai_errors.ClientError:
+            # Erreur non-récupérable (clé API, quota, etc.) : on remonte tout de suite
             raise
+        except Exception as e:
+            last_error = e
+            print(f"[✗] {model_name} épuisé après 3 tentatives. Passage au modèle suivant...")
 
-    raise RuntimeError(f"Gemini indisponible après {max_retries} tentatives : {last_error}")
+    raise RuntimeError(
+        f"Tous les modèles Gemini sont indisponibles après cascade complète "
+        f"({' → '.join(GEMINI_MODELS)}). Dernière erreur : {last_error}"
+    )
 
 # ==============================================================================
 # 6. MISE EN FORME TELEGRAM (HTML)
@@ -377,18 +494,36 @@ def send_telegram_report(report_text):
 # 8. EXÉCUTION DU PIPELINE
 # ==============================================================================
 def main():
-    print("--> 1. Collecte des métriques et des actualités...")
+    print("=" * 60)
+    print("  BITCOIN BRIEFING BOT — Démarrage du pipeline")
+    print("=" * 60)
+
+    # --- Étape 1 : collecte de toutes les données ---
+    print("\n--> 1. Collecte des métriques de marché...")
     date_str = datetime.now().strftime("%d/%m/%Y — %H:%M")
+
+    btc_price, btc_change = fetch_btc_price()
+    print(f"    Prix BTC : {btc_price} ({btc_change})")
+
+    fg_value, fg_label, fg_emoji = fetch_fear_greed()
+    print(f"    Fear & Greed : {fg_value} — {fg_label} {fg_emoji}")
+
     funding = fetch_funding_rate()
+    print(f"    Funding Rate : {funding}")
+
+    print("\n--> 2. Collecte des actualités (RSS + YouTube)...")
     rss_news = fetch_rss_news()
     yt_news = fetch_youtube_transcripts()
 
+    # --- Étape 2 : assemblage du payload brut pour Gemini ---
     raw_payload = f"""
 [DATE ET HEURE DU BRIEFING — à recopier telle quelle dans le titre]
 {date_str}
 
-[MÉTRIQUES TECHNIQUES]
+[MÉTRIQUES TECHNIQUES — à recopier telles quelles dans le dashboard]
+- Prix BTC : {btc_price} ({btc_change} sur 24h)
 - Funding Rate BTCUSDT : {funding}
+- Fear & Greed Index : {fg_value} — {fg_label} {fg_emoji}
 
 [FLUX ACTUALITÉS RSS]
 {rss_news}
@@ -397,21 +532,25 @@ def main():
 {yt_news}
 """
 
-    print("--> 2. Analyse par Gemini...")
+    # --- Étape 3 : analyse par Gemini (cascade multi-modèle) ---
+    print("\n--> 3. Analyse par Gemini (cascade multi-modèle)...")
     try:
         report = analyze_with_gemini(raw_payload)
     except Exception as e:
         print(f"[!] Impossible de générer le briefing : {e}")
         send_telegram(
-            "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
-            "indisponible ou saturé). Nouvelle tentative au prochain cycle."
+            "⚠️ Le briefing Bitcoin n'a pas pu être généré.\n\n"
+            f"Modèles tentés : {', '.join(GEMINI_MODELS)}\n"
+            "Raison probable : saturation temporaire du service Gemini (free tier).\n"
+            "Nouvelle tentative au prochain cycle."
         )
         sys.exit(1)  # Run visible en échec (croix rouge) : Gemini a posé problème
 
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
-    print("\n--> 3. Envoi du briefing...")
+    # --- Étape 4 : envoi sur Telegram ---
+    print("\n--> 4. Envoi du briefing sur Telegram...")
     if "AUCUN SIGNAL MAJEUR DÉTECTÉ" in report:
         print("[i] Aucun événement matériel détecté. Envoi ignoré (comportement normal, pas une erreur).")
         return
@@ -419,6 +558,8 @@ def main():
     if not send_telegram_report(report):
         print("[!] Le briefing a été généré mais n'a pas pu être livré (entièrement) sur Telegram.")
         sys.exit(1)  # Run visible en échec (croix rouge) : Telegram a refusé/échoué l'envoi
+
+    print("\n[✓] Pipeline terminé avec succès !")
 
 if __name__ == "__main__":
     main()
