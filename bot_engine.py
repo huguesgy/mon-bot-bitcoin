@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import random
 import sys
 from datetime import datetime
 
@@ -18,35 +19,32 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Flux RSS réputés et institutionnels (100% gratuits), avec un niveau de fiabilité par source
-# (logique inspirée de World Monitor) :
-#   Tier 1 = source officielle/primaire (gouvernement, banque centrale) — la plus haute confiance
-#   Tier 2 = média crypto établi, réputation solide, souvent premier à rapporter
-#   Tier 3 = média crypto spécialisé/niche — fiable mais à corroborer si isolé
+# Cascade de modèles Gemini (free tier) : si le premier est saturé, on passe au suivant.
+# Ordre : du plus récent (souvent moins sollicité) au plus éprouvé.
+GEMINI_MODELS = [
+    "gemini-3.8-flash",   # sorti le 02/09/2026, le plus récent → souvent moins de trafic
+    "gemini-3.7-flash",   # workhorse d'août 2026
+    "gemini-3.6-flash",   # ton modèle actuel, le plus éprouvé
+]
+
+# Flux RSS réputés et institutionnels (100% gratuits)
 RSS_FEEDS = [
-    {"name": "Federal Reserve", "url": "https://www.federalreserve.gov/feeds/press_monetary.xml", "tier": 1},
-    {"name": "SEC", "url": "https://www.sec.gov/news/pressreleases.rss", "tier": 1},
-    {"name": "Cointelegraph", "url": "https://cointelegraph.com/rss/tag/bitcoin", "tier": 2},
-    {"name": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", "tier": 2},
-    {"name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/.rss/full/", "tier": 3},
-    {"name": "CryptoSlate", "url": "https://cryptoslate.com/feed/", "tier": 3},
+    "https://cointelegraph.com/rss/tag/bitcoin",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+    "https://bitcoinmagazine.com/.rss/full/",
+    "https://cryptoslate.com/feed/",
+    # Sources officielles/primaires : peu de volume, mais signal fort quand un fait apparaît
+    "https://www.federalreserve.gov/feeds/press_monetary.xml",  # Décisions de taux, déclarations FOMC
+    "https://www.sec.gov/news/pressreleases.rss",  # Actions/poursuites de la SEC
 ]
 
-# ID des chaînes YouTube ciblées — Tier 4 : analyse/opinion indépendante, pas du journalisme,
-# à traiter comme un point de vue à évaluer, jamais comme un fait établi en soi.
+# ID des chaînes YouTube ciblées pour extraire automatiquement leur dernière vidéo
 YOUTUBE_CHANNELS = [
-    {"name": "Grand Angle Crypto", "channel_id": "UCqK_m6k_gq3_bO7J45c7xzg", "tier": 4},
-    {"name": "Hasheur", "channel_id": "UChlTcWDE8gd4tsl_L727NrQ", "tier": 4},
+    {"name": "Grand Angle Crypto", "channel_id": "UCqK_m6k_gq3_bO7J45c7xzg"},
+    {"name": "Hasheur", "channel_id": "UChlTcWDE8gd4tsl_L727NrQ"},
 ]
 
-TIER_LABELS = {
-    1: "Tier 1 — source officielle/primaire",
-    2: "Tier 2 — média établi",
-    3: "Tier 3 — média spécialisé/niche",
-    4: "Tier 4 — analyse indépendante (opinion, pas du journalisme)",
-}
-
-# Prompt système : anti-bruit + couche pédagogique
+# Prompt système : anti-bruit + couche pédagogique + format enrichi
 # NB : le format utilise **mot** pour le gras -> converti en <b>mot</b> pour Telegram (voir to_telegram_html)
 SYSTEM_PROMPT = """
 Tu es un analyste qui explique le marché du Bitcoin (BTC) à quelqu'un qui s'intéresse à la finance
@@ -57,31 +55,11 @@ RÈGLES D'EXCLUSION STRICTES (à ignorer totalement) :
 - Avis de traders anonymes, spéculations court terme, titres clickbait ("x100", "krach imminent").
 - Redondances : si plusieurs sources traitent du même évènement, synthétise-le en un seul point.
 
-PONDÉRATION PAR FIABILITÉ DE SOURCE (chaque article/vidéo est étiqueté avec son tier) :
-- Tier 1 (officiel/primaire) : la plus haute confiance, un seul Tier 1 suffit pour retenir un fait.
-- Tier 2 (média établi) : fiable, traite comme un fait sauf signe contraire.
-- Tier 3 (média spécialisé/niche) : traite avec un peu plus de prudence. Si un fait Tier 3 n'est
-  corroboré par aucune source Tier 1 ou 2, tu peux quand même le retenir s'il est important, mais
-  garde un ton légèrement plus prudent dans sa formulation ("selon [source]..." plutôt qu'affirmatif).
-- Tier 4 (analyse YouTube indépendante) : ce n'est PAS une source factuelle vérifiée, c'est un point
-  de vue individuel. Ne présente JAMAIS son contenu comme un fait établi. Utilise-le uniquement pour
-  illustrer un raisonnement (notamment dans "Réflexe du trader fondamental"), jamais comme preuve
-  d'un évènement de marché.
-En cas de conflit entre sources sur un même fait, fais confiance au tier le plus élevé.
-
 CRITÈRES DE SÉLECTION (ne retenir que les faits matériels) :
 1. Macroéconomie US & banques centrales (taux Fed, inflation CPI/PCE, liquidité mondiale, US10Y).
 2. Flux institutionnels vérifiés (entrées/sorties nettes des ETF Spot, réserves de trésorerie).
 3. Régulation contraignante (lois votées, poursuites judiciaires majeures SEC/CFTC).
 4. Dérivés & liquidations (Funding Rate anormal, cascades de liquidations).
-
-LONGUEUR (contrainte technique importante) :
-Telegram refuse tout message de plus de 4096 caractères, et le briefing est découpé en plusieurs
-messages quand il dépasse ce seuil — ce qui casse la lecture. Vise environ 3000 à 3500 caractères
-au total pour l'ensemble du briefing. Pour tenir cet objectif sans perdre en clarté : retiens au
-maximum 2 faits dans "Ce qu'il s'est passé" (3 seulement si un troisième est vraiment indispensable),
-et formule chaque explication de façon dense et directe plutôt que développée sur plusieurs phrases.
-La clarté prime sur l'exhaustivité : mieux vaut 2 faits bien expliqués que 3 faits expédiés.
 
 COMMENT EXPLIQUER (règle la plus importante — ne l'oublie jamais) :
 Pour CHAQUE fait retenu, ne te contente pas de l'énoncer. Ajoute systématiquement :
@@ -109,13 +87,22 @@ N'utilise aucun autre symbole de mise en forme.
 Reproduis EXACTEMENT les lignes de séparation (━━━━━━━━━━━━━━━━━━━━) telles quelles, sans les modifier
 ni les résumer.
 Utilise la date fournie dans les informations brutes telle quelle, ne la déduis jamais toi-même.
+Pour le bloc Dashboard, recopie les données fournies (prix, Fear & Greed, Funding Rate) telles
+quelles — ne les invente pas, ne les arrondis pas autrement.
 
 ```
 ════════════════════════════
-  BRIEFING BITCOIN
+  📊 BRIEFING BITCOIN
   [date fournie] · UTC
 ════════════════════════════
 ```
+
+**💰 BTC** `[prix fourni]` **·** `[variation 24h fournie]`
+**📊 F&G** `[valeur F&G fournie]` [emoji F&G fourni]
+**📈 Funding** `[funding rate fourni]` **·** [neutre / surchauffe / pression vendeuse]
+**⛏️ Hash Rate** `[hash rate fourni]` **·** `[variation fournie]`
+
+━━━━━━━━━━━━━━━━━━━━
 
 **🏷️ Catalyseurs :** #MotClé1 #MotClé2 #MotClé3
 
@@ -151,7 +138,11 @@ sans donner de verdict d'action.]
 ━━━━━━━━━━━━━━━━━━━━
 
 **🔗 Sources**
-1. [Nom du média] (Tier [n]) : [lien]
+1. [Nom du média] : [lien]
+
+━━━━━━━━━━━━━━━━━━━━
+
+⚠️ Ce briefing est éducatif et ne constitue pas un conseil financier. Faites vos propres recherches (DYOR) avant toute décision.
 
 Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactement :
 "AUCUN SIGNAL MAJEUR DÉTECTÉ POUR CE CRÉNEAU."
@@ -160,6 +151,60 @@ Si absolument aucun fait matériel n'est détecté dans le lot, réponds exactem
 # ==============================================================================
 # 2. COLLECTE DES DONNÉES DE MARCHÉ
 # ==============================================================================
+def fetch_btc_price():
+    """
+    Récupère le prix actuel du BTC en USD et sa variation sur 24h via CoinGecko.
+    API 100% gratuite, sans clé, sans inscription.
+    """
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin",
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()["bitcoin"]
+        price = data["usd"]
+        change_24h = data["usd_24h_change"]
+        return f"${price:,.0f}", f"{change_24h:+.1f}%"
+    except Exception as e:
+        print(f"[!] Prix BTC indisponible : {e}")
+        return "Indisponible", "N/A"
+
+
+def fetch_fear_greed():
+    """
+    Récupère l'indice Fear & Greed crypto (0 = peur extrême, 100 = euphorie).
+    API 100% gratuite via alternative.me, sans clé.
+    Retourne (valeur_str, label, emoji) ex: ("72", "Greed", "🟢")
+    """
+    EMOJI_MAP = {
+        (0, 25): "🔴",    # Extreme Fear
+        (25, 45): "🟠",   # Fear
+        (45, 55): "🟡",   # Neutral
+        (55, 75): "🟢",   # Greed
+        (75, 101): "🟣",  # Extreme Greed
+    }
+    try:
+        url = "https://api.alternative.me/fng/?limit=1"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()["data"][0]
+        value = int(data["value"])
+        label = data["value_classification"]
+        emoji = "⚪"
+        for (low, high), em in EMOJI_MAP.items():
+            if low <= value < high:
+                emoji = em
+                break
+        return f"{value}/100", label, emoji
+    except Exception as e:
+        print(f"[!] Fear & Greed indisponible : {e}")
+        return "N/A", "Indisponible", "⚪"
+
+
 def fetch_funding_rate():
     """
     Récupère le dernier funding rate BTCUSDT.
@@ -190,25 +235,54 @@ def fetch_funding_rate():
         print(f"[!] Erreur récupération Funding Rate (Bybit) : {e}")
         return "Indisponible"
 
+
+def fetch_hash_rate():
+    """
+    Récupère le hash rate du réseau Bitcoin via blockchain.info (gratuit, sans clé).
+    Le hash rate mesure la puissance de calcul totale dédiée au minage.
+    Une chute marquée peut signaler une capitulation des mineurs — c'est un vrai
+    signal fondamental sur la santé du réseau, pas un indicateur de prix.
+    Retourne (hash_rate_str, variation_str) ex: ("849.0 EH/s", "-16.8%")
+    """
+    try:
+        url = "https://api.blockchain.info/charts/hash-rate?timespan=5days&format=json"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        values = data.get("values", [])
+        if len(values) >= 2:
+            latest = values[-1]["y"]
+            previous = values[-2]["y"]
+            change = ((latest - previous) / previous) * 100
+            latest_eh = latest / 1_000_000  # TH/s → EH/s
+            return f"{latest_eh:,.1f} EH/s", f"{change:+.1f}%"
+        elif values:
+            latest = values[-1]["y"]
+            latest_eh = latest / 1_000_000
+            return f"{latest_eh:,.1f} EH/s", "N/A"
+        else:
+            return "Indisponible", "N/A"
+    except Exception as e:
+        print(f"[!] Hash Rate indisponible : {e}")
+        return "Indisponible", "N/A"
+
+
 # ==============================================================================
 # 3. COLLECTE DES FLUX RSS
 # ==============================================================================
 def fetch_rss_news(limit_per_feed=3):
-    """Extrait les derniers articles publiés depuis les flux RSS, étiquetés par tier de fiabilité."""
+    """Extrait les derniers articles publiés depuis les flux RSS."""
     articles = []
-    for feed in RSS_FEEDS:
+    for feed_url in RSS_FEEDS:
         try:
-            parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:limit_per_feed]:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:limit_per_feed]:
                 title = getattr(entry, "title", "Sans titre").strip()
                 summary = getattr(entry, "summary", "").strip()
                 link = getattr(entry, "link", "").strip()
-                articles.append(
-                    f"- [{feed['name']} — {TIER_LABELS[feed['tier']]}]\n"
-                    f"  Titre: {title}\n  Résumé: {summary[:250]}...\n  Lien: {link}"
-                )
+                articles.append(f"- Titre: {title}\n  Résumé: {summary[:250]}...\n  Lien: {link}")
         except Exception as e:
-            print(f"[!] Erreur lecture flux {feed['url']} : {e}")
+            print(f"[!] Erreur lecture flux {feed_url} : {e}")
     return "\n".join(articles) if articles else "Aucun article disponible."
 
 # ==============================================================================
@@ -234,8 +308,7 @@ def fetch_youtube_transcripts():
             full_text = " ".join(snippet.text for snippet in fetched)
 
             transcripts.append(
-                f"- [Chaîne: {ch['name']} — {TIER_LABELS[ch['tier']]}]\n"
-                f"  Titre: {video_title}\n  Lien: {video_link}\n"
+                f"- Chaîne: {ch['name']}\n  Titre: {video_title}\n  Lien: {video_link}\n"
                 f"  Extrait Transcription: {full_text[:2000]}..."
             )
         except Exception as e:
@@ -244,14 +317,58 @@ def fetch_youtube_transcripts():
     return "\n".join(transcripts) if transcripts else "Aucune vidéo récente exploitable."
 
 # ==============================================================================
-# 5. SYNTHÈSE & ANALYSE AVEC GEMINI
+# 5. SYNTHÈSE & ANALYSE AVEC GEMINI (cascade multi-modèle + retry agressif)
 # ==============================================================================
-def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
+def _retry_with_backoff(client, model_name, prompt, max_retries=3, base_delay=20):
+    """
+    Tente d'appeler un modèle Gemini donné avec backoff exponentiel + jitter.
+    Retourne le texte généré, ou lève l'exception si toutes les tentatives échouent.
+
+    Délais approximatifs : 20s → 60s → 120s (+ jitter ±30% à chaque fois).
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            return response.text
+        except genai_errors.ServerError as e:
+            last_error = e
+            if attempt < max_retries:
+                # Backoff exponentiel : base * 2^(attempt-1) → 20, 60, 120
+                raw_delay = base_delay * (2 ** (attempt - 1))
+                # Plafonner à 5 minutes pour ne pas attendre une éternité
+                capped_delay = min(raw_delay, 300)
+                # Jitter ±30% pour désynchroniser les requêtes concurrentes
+                jitter = capped_delay * random.uniform(-0.3, 0.3)
+                wait = max(5, capped_delay + jitter)  # au moins 5 secondes
+                print(f"[!] {model_name} indisponible (tentative {attempt}/{max_retries}) : {e}")
+                print(f"    Nouvel essai dans {wait:.0f}s...")
+                time.sleep(wait)
+            else:
+                print(f"[!] {model_name} indisponible (tentative {attempt}/{max_retries}) : {e}")
+        except genai_errors.ClientError:
+            # Erreur côté requête (clé invalide, quota, prompt trop long...) : inutile de réessayer
+            raise
+
+    raise last_error  # type: ignore[misc]
+
+
+def analyze_with_gemini(raw_context):
     """
     Envoie l'agrégat d'informations au modèle pour filtrage, explication et mise en forme.
-    Réessaie automatiquement en cas de saturation temporaire de Gemini (erreur 503 UNAVAILABLE,
-    fréquente sur le tier gratuit aux heures de pointe). N'insiste pas sur les erreurs côté requête
-    (clé invalide, quota dépassé, etc.), qui ne se résoudront pas en réessayant.
+
+    Stratégie de résilience (cascade multi-modèle) :
+    Pour chaque modèle dans GEMINI_MODELS, on tente 3 appels avec backoff exponentiel.
+    Si un modèle échoue après 3 tentatives (saturation, maintenance...), on passe au suivant.
+
+    Chaîne : gemini-3.8-flash → gemini-3.7-flash → gemini-3.6-flash
+    Temps total max : ~18 minutes (largement acceptable pour un cron espacé de plusieurs heures).
+
+    N'insiste pas sur les erreurs côté requête (clé invalide, quota dépassé, etc.), qui ne se
+    résoudront pas en réessayant — celles-ci remontent immédiatement.
     """
     if not GEMINI_API_KEY:
         raise ValueError("La variable GEMINI_API_KEY est manquante.")
@@ -260,25 +377,23 @@ def analyze_with_gemini(raw_context, max_retries=3, base_delay=20):
     full_prompt = f"{SYSTEM_PROMPT}\n\n=== INFORMATIONS BRUTES À TRAITER ===\n{raw_context}"
 
     last_error = None
-    for attempt in range(1, max_retries + 1):
+    for model_name in GEMINI_MODELS:
+        print(f"[→] Tentative avec {model_name}...")
         try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=full_prompt
-            )
-            return response.text
-        except genai_errors.ServerError as e:
-            last_error = e
-            wait = base_delay * attempt
-            print(f"[!] Gemini indisponible (tentative {attempt}/{max_retries}) : {e}")
-            if attempt < max_retries:
-                print(f"    Nouvel essai dans {wait}s...")
-                time.sleep(wait)
-        except genai_errors.ClientError as e:
-            # Erreur côté requête (clé invalide, quota, prompt trop long...) : inutile de réessayer
+            result = _retry_with_backoff(client, model_name, full_prompt)
+            print(f"[✓] Réponse obtenue via {model_name}")
+            return result
+        except genai_errors.ClientError:
+            # Erreur non-récupérable (clé API, quota, etc.) : on remonte tout de suite
             raise
+        except Exception as e:
+            last_error = e
+            print(f"[✗] {model_name} épuisé après 3 tentatives. Passage au modèle suivant...")
 
-    raise RuntimeError(f"Gemini indisponible après {max_retries} tentatives : {last_error}")
+    raise RuntimeError(
+        f"Tous les modèles Gemini sont indisponibles après cascade complète "
+        f"({' → '.join(GEMINI_MODELS)}). Dernière erreur : {last_error}"
+    )
 
 # ==============================================================================
 # 6. MISE EN FORME TELEGRAM (HTML)
@@ -342,18 +457,15 @@ def to_telegram_html(text):
 # ==============================================================================
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
-def send_telegram(message_text, reply_to_message_id=None):
+def send_telegram(message_text):
     """
     Expédie un message formaté (HTML) sur votre canal ou chat privé Telegram.
-    Si reply_to_message_id est fourni, le message est envoyé comme réponse à ce message
-    (utilisé pour "enfiler" les morceaux d'un briefing découpé, au lieu de deux bulles
-    déconnectées l'une de l'autre).
-    Retourne l'ID du message envoyé (int) si succès, None sinon — pour que main() puisse
-    faire échouer le job GitHub Actions de façon visible en cas de problème.
+    Retourne True si Telegram a confirmé la réception, False sinon — pour que main()
+    puisse faire échouer le job GitHub Actions de façon visible en cas de problème.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
-        return None
+        return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -362,21 +474,18 @@ def send_telegram(message_text, reply_to_message_id=None):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    if reply_to_message_id is not None:
-        payload["reply_to_message_id"] = reply_to_message_id
-        payload["allow_sending_without_reply"] = True  # envoie quand même si le message d'origine a disparu
 
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
             print("[✓] Morceau envoyé avec succès sur Telegram !")
-            return res.json()["result"]["message_id"]
+            return True
         else:
             print(f"[!] Erreur Telegram ({res.status_code}) : {res.text}")
-            return None
+            return False
     except Exception as e:
         print(f"[!] Exception lors de l'envoi Telegram : {e}")
-        return None
+        return False
 
 SECTION_DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 TELEGRAM_SAFE_CHUNK_LEN = 3200  # marge sous la limite dure de 4096 caractères de Telegram,
@@ -404,38 +513,54 @@ def split_report_into_chunks(raw_text, max_len=TELEGRAM_SAFE_CHUNK_LEN):
 def send_telegram_report(report_text):
     """
     Envoie le briefing sur Telegram, en le découpant en plusieurs messages si besoin.
-    Chaque morceau est envoyé en réponse au précédent (thread Telegram), pour que
-    plusieurs messages restent visuellement liés au lieu de deux bulles déconnectées.
     Retourne True seulement si TOUS les morceaux ont été livrés avec succès.
     """
     chunks = split_report_into_chunks(report_text)
     all_ok = True
-    previous_id = None
     for i, chunk in enumerate(chunks):
         if len(chunks) > 1 and i < len(chunks) - 1:
-            chunk += "\n\n(suite ci-dessous ⤵️)"
-        msg_id = send_telegram(chunk, reply_to_message_id=previous_id)
-        all_ok = all_ok and (msg_id is not None)
-        if msg_id is not None:
-            previous_id = msg_id
+            chunk += "\n\n(suite dans le message suivant...)"
+        all_ok = send_telegram(chunk) and all_ok
     return all_ok
 
 # ==============================================================================
 # 8. EXÉCUTION DU PIPELINE
 # ==============================================================================
 def main():
-    print("--> 1. Collecte des métriques et des actualités...")
+    print("=" * 60)
+    print("  BITCOIN BRIEFING BOT — Démarrage du pipeline")
+    print("=" * 60)
+
+    # --- Étape 1 : collecte de toutes les données ---
+    print("\n--> 1. Collecte des métriques de marché...")
     date_str = datetime.now().strftime("%d/%m/%Y — %H:%M")
+
+    btc_price, btc_change = fetch_btc_price()
+    print(f"    Prix BTC : {btc_price} ({btc_change})")
+
+    fg_value, fg_label, fg_emoji = fetch_fear_greed()
+    print(f"    Fear & Greed : {fg_value} — {fg_label} {fg_emoji}")
+
     funding = fetch_funding_rate()
+    print(f"    Funding Rate : {funding}")
+
+    hr_value, hr_change = fetch_hash_rate()
+    print(f"    Hash Rate : {hr_value} ({hr_change})")
+
+    print("\n--> 2. Collecte des actualités (RSS + YouTube)...")
     rss_news = fetch_rss_news()
     yt_news = fetch_youtube_transcripts()
 
+    # --- Étape 2 : assemblage du payload brut pour Gemini ---
     raw_payload = f"""
 [DATE ET HEURE DU BRIEFING — à recopier telle quelle dans le titre]
 {date_str}
 
-[MÉTRIQUES TECHNIQUES]
+[MÉTRIQUES TECHNIQUES — à recopier telles quelles dans le dashboard]
+- Prix BTC : {btc_price} ({btc_change} sur 24h)
 - Funding Rate BTCUSDT : {funding}
+- Fear & Greed Index : {fg_value} — {fg_label} {fg_emoji}
+- Hash Rate réseau : {hr_value} ({hr_change} vs veille)
 
 [FLUX ACTUALITÉS RSS]
 {rss_news}
@@ -444,21 +569,25 @@ def main():
 {yt_news}
 """
 
-    print("--> 2. Analyse par Gemini...")
+    # --- Étape 3 : analyse par Gemini (cascade multi-modèle) ---
+    print("\n--> 3. Analyse par Gemini (cascade multi-modèle)...")
     try:
         report = analyze_with_gemini(raw_payload)
     except Exception as e:
         print(f"[!] Impossible de générer le briefing : {e}")
         send_telegram(
-            "⚠️ Le briefing Bitcoin n'a pas pu être généré (service Gemini temporairement "
-            "indisponible ou saturé). Nouvelle tentative au prochain cycle."
+            "⚠️ Le briefing Bitcoin n'a pas pu être généré.\n\n"
+            f"Modèles tentés : {', '.join(GEMINI_MODELS)}\n"
+            "Raison probable : saturation temporaire du service Gemini (free tier).\n"
+            "Nouvelle tentative au prochain cycle."
         )
         sys.exit(1)  # Run visible en échec (croix rouge) : Gemini a posé problème
 
     print("\n--- RÉSULTAT DU RAPPORT ---\n")
     print(report)
 
-    print("\n--> 3. Envoi du briefing...")
+    # --- Étape 4 : envoi sur Telegram ---
+    print("\n--> 4. Envoi du briefing sur Telegram...")
     if "AUCUN SIGNAL MAJEUR DÉTECTÉ" in report:
         print("[i] Aucun événement matériel détecté. Envoi ignoré (comportement normal, pas une erreur).")
         return
@@ -466,6 +595,8 @@ def main():
     if not send_telegram_report(report):
         print("[!] Le briefing a été généré mais n'a pas pu être livré (entièrement) sur Telegram.")
         sys.exit(1)  # Run visible en échec (croix rouge) : Telegram a refusé/échoué l'envoi
+
+    print("\n[✓] Pipeline terminé avec succès !")
 
 if __name__ == "__main__":
     main()
