@@ -75,6 +75,14 @@ CRITÈRES DE SÉLECTION (ne retenir que les faits matériels) :
 3. Régulation contraignante (lois votées, poursuites judiciaires majeures SEC/CFTC).
 4. Dérivés & liquidations (Funding Rate anormal, cascades de liquidations).
 
+LONGUEUR (contrainte technique importante) :
+Telegram refuse tout message de plus de 4096 caractères, et le briefing est découpé en plusieurs
+messages quand il dépasse ce seuil — ce qui casse la lecture. Vise environ 3000 à 3500 caractères
+au total pour l'ensemble du briefing. Pour tenir cet objectif sans perdre en clarté : retiens au
+maximum 2 faits dans "Ce qu'il s'est passé" (3 seulement si un troisième est vraiment indispensable),
+et formule chaque explication de façon dense et directe plutôt que développée sur plusieurs phrases.
+La clarté prime sur l'exhaustivité : mieux vaut 2 faits bien expliqués que 3 faits expédiés.
+
 COMMENT EXPLIQUER (règle la plus importante — ne l'oublie jamais) :
 Pour CHAQUE fait retenu, ne te contente pas de l'énoncer. Ajoute systématiquement :
 - Le mécanisme : pourquoi/comment ce fait influence concrètement l'offre, la demande ou le prix du BTC.
@@ -334,15 +342,18 @@ def to_telegram_html(text):
 # ==============================================================================
 # 7. ENVOI DE L'ALERTE SUR TELEGRAM
 # ==============================================================================
-def send_telegram(message_text):
+def send_telegram(message_text, reply_to_message_id=None):
     """
     Expédie un message formaté (HTML) sur votre canal ou chat privé Telegram.
-    Retourne True si Telegram a confirmé la réception, False sinon — pour que main()
-    puisse faire échouer le job GitHub Actions de façon visible en cas de problème.
+    Si reply_to_message_id est fourni, le message est envoyé comme réponse à ce message
+    (utilisé pour "enfiler" les morceaux d'un briefing découpé, au lieu de deux bulles
+    déconnectées l'une de l'autre).
+    Retourne l'ID du message envoyé (int) si succès, None sinon — pour que main() puisse
+    faire échouer le job GitHub Actions de façon visible en cas de problème.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[!] Identifiants Telegram manquants. Message non envoyé.")
-        return False
+        return None
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -351,18 +362,21 @@ def send_telegram(message_text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
+    if reply_to_message_id is not None:
+        payload["reply_to_message_id"] = reply_to_message_id
+        payload["allow_sending_without_reply"] = True  # envoie quand même si le message d'origine a disparu
 
     try:
         res = requests.post(url, json=payload, timeout=15)
         if res.status_code == 200:
             print("[✓] Morceau envoyé avec succès sur Telegram !")
-            return True
+            return res.json()["result"]["message_id"]
         else:
             print(f"[!] Erreur Telegram ({res.status_code}) : {res.text}")
-            return False
+            return None
     except Exception as e:
         print(f"[!] Exception lors de l'envoi Telegram : {e}")
-        return False
+        return None
 
 SECTION_DIVIDER = "━━━━━━━━━━━━━━━━━━━━"
 TELEGRAM_SAFE_CHUNK_LEN = 3200  # marge sous la limite dure de 4096 caractères de Telegram,
@@ -390,14 +404,20 @@ def split_report_into_chunks(raw_text, max_len=TELEGRAM_SAFE_CHUNK_LEN):
 def send_telegram_report(report_text):
     """
     Envoie le briefing sur Telegram, en le découpant en plusieurs messages si besoin.
+    Chaque morceau est envoyé en réponse au précédent (thread Telegram), pour que
+    plusieurs messages restent visuellement liés au lieu de deux bulles déconnectées.
     Retourne True seulement si TOUS les morceaux ont été livrés avec succès.
     """
     chunks = split_report_into_chunks(report_text)
     all_ok = True
+    previous_id = None
     for i, chunk in enumerate(chunks):
         if len(chunks) > 1 and i < len(chunks) - 1:
-            chunk += "\n\n(suite dans le message suivant...)"
-        all_ok = send_telegram(chunk) and all_ok
+            chunk += "\n\n(suite ci-dessous ⤵️)"
+        msg_id = send_telegram(chunk, reply_to_message_id=previous_id)
+        all_ok = all_ok and (msg_id is not None)
+        if msg_id is not None:
+            previous_id = msg_id
     return all_ok
 
 # ==============================================================================
